@@ -1,0 +1,17 @@
+# Runtime only — what the dashboard itself imports.
+#
+# Streamlit Community Cloud installs this file, so it is deliberately the
+# smaller of the two: the app reads curated parquet and nothing else, so the
+# price layer and the test runner have no business in a deployment. Use
+# requirements-dev.txt for a machine that also runs `build` or `pytest`.
+
+streamlit>=1.40,<2
+plotly>=7.0,<8
+pandas>=3.0,<4      # not 2.x — see below
+pyarrow>=17.0       # pandas reads the curated parquet through it
+PyYAML>=6.0,<7
+
+# pandas 3.0 is a floor, not a preference. Datetime resolution is enforced
+# strictly on joins and `stack(future_stack=True)` is used throughout, so 2.x
+# fails or warns around both. The old floor said >=2.2 and only worked because
+# a fresh resolve happened to pick 3.x.

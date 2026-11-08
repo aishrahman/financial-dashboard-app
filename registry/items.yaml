@@ -1,0 +1,782 @@
+# Canonical item registry — what every value in the panel MEANS.
+#
+# The extractor's `key` column is already a stable code (`revenue`,
+# `total_assets`). What it does not carry is the metadata analysis needs:
+# whether an item is a stock or a flow, which sign to expect, which templates
+# it is valid for, and how to recover it when a filer never tagged it. That is
+# what this file adds. Adding coverage means editing YAML, not Python — the
+# same contract the extractor's mappings/base.yaml keeps.
+#
+# FIELDS
+#   label        display name
+#   statement    income_statement | balance_sheet | cash_flow | derived
+#   role         total | subtotal | component | per_share | count
+#   period_type  instant (a balance, carried forward)  |  flow (summed over a period)
+#   sign         positive (a MAGNITUDE. Filers disagree on presentation — Boeing
+#                tagged CostOfRevenue negative through 2009 while reporting the
+#                same gross profit — so negatives here are normalized to their
+#                absolute value at ingest and the flip is recorded in the
+#                provenance. Without this, revenue - cost_of_revenue returns
+#                30.2bn for Boeing instead of 2.8bn.)
+#                signed   (legitimately either way — net income, net cash flows,
+#                and the equity of a company that has bought back more than its
+#                book. Never touched.)
+#   templates    which company templates the item is valid for
+#   derive       ordered identity fallbacks, tried when the panel has no value
+#   store        XBRL concepts to pull from the extractor's fact store, tried
+#                after `derive` fails
+#   zero_is_missing
+#                an exact 0.0 is a failed tag rather than a balance, so it is
+#                read as missing. Only for items where zero is genuinely
+#                impossible — NOT for long_term_debt, which is legitimately
+#                zero for Apple before 2013 and Meta before 2022.
+#
+# SIGN CONVENTION (verified empirically against the panel, not assumed)
+#   Expenses are POSITIVE magnitudes (natural debit balance): cost_of_revenue,
+#   selling_general_admin, interest_expense, income_tax_expense.
+#   "Payments" items are POSITIVE magnitudes too, because they come from
+#   PaymentsTo/PaymentsOf concepts: capital_expenditures, dividends_paid,
+#   share_repurchases, acquisitions. Free cash flow therefore SUBTRACTS capex.
+#   Net flows (cash_from_investing/financing) and income lines are signed.
+#
+# DERIVE EXPRESSIONS
+#   Arithmetic over other item codes: + - * / parentheses, numeric literals.
+#   opt(x)         treat a missing x as zero. Use ONLY where absence genuinely
+#                  means zero — a filer with no short-term debt line usually has
+#                  no short-term debt. Never use it to paper over a real gap.
+#   coalesce(a,b)  first of a, b that exists.
+#   Every derived value is tagged with its provenance so the dashboard can
+#   always show what was reported and what was inferred.
+
+defaults:
+  role: component
+  period_type: instant
+  sign: positive
+  templates: [industrial, bank, insurer, reit, utility, telecom]
+
+items:
+
+  # ======================= INCOME STATEMENT ===============================
+  revenue:
+    label: Revenue
+    statement: income_statement
+    role: total
+    period_type: flow
+    sign: signed          # negative revenue is possible for insurers when
+                          # realized investment losses swamp premiums earned
+    # No at_least guard here, deliberately. One stood here to catch the
+    # extractor landing on RevenueFromContractWithCustomerExcludingAssessedTax
+    # — the ASC 606 line, which excludes insurance premiums and lease revenue
+    # and gave MetLife a $1.29bn 2019 revenue against $42.2bn of premiums
+    # earned. The extractor fixed that at the mapping, and MET 2019 now reads
+    # $69.62bn.
+    #
+    # The guard was removed rather than left in place because its premise was
+    # never sound: "revenue >= premiums earned" is not an identity. Realised
+    # investment losses are negative components of an insurer's total revenue,
+    # exactly as the `sign: signed` note three lines above says. In 2008 that
+    # is ordinary — Hartford earned $15.50bn of premiums on $9.22bn of total
+    # revenue, Progressive $13.63bn on $12.84bn — and both are correct. With
+    # the upstream bug gone those two were the only rows it still fired on, so
+    # all it did was delete them.
+  cost_of_revenue:
+    label: Cost of Revenue
+    statement: income_statement
+    period_type: flow
+    templates: [industrial]
+    derive:
+      - expr: revenue - gross_profit
+        confidence: high
+    # TOTALS only. CostOfGoodsSold and CostOfServices are deliberately absent:
+    # a filer reporting both has neither equal to total cost, and taking one
+    # alone is how Oracle ends up with a 2.8bn cost against a true 14.6bn. The
+    # extractor excludes them from its own mapping for exactly this reason.
+    store: [CostOfRevenue, CostOfGoodsAndServicesSold]
+  gross_profit:
+    label: Gross Profit
+    statement: income_statement
+    role: subtotal
+    period_type: flow
+    sign: signed
+    templates: [industrial]
+    derive:
+      # Only 33% of industrial ticker-years tag GrossProfit and only 61% tag a
+      # cost line, so this identity is the difference between a usable gross
+      # margin series and a mostly-empty one.
+      - expr: revenue - cost_of_revenue
+        confidence: high
+    store: [GrossProfit]
+  research_development:
+    label: Research & Development
+    statement: income_statement
+    period_type: flow
+    templates: [industrial]
+  selling_general_admin:
+    label: Selling, General & Administrative
+    statement: income_statement
+    period_type: flow
+  operating_expenses:
+    label: Total Operating Expenses
+    statement: income_statement
+    role: subtotal
+    period_type: flow
+    templates: [industrial, insurer, reit, telecom, utility]
+  operating_income:
+    label: Operating Income
+    statement: income_statement
+    role: subtotal
+    period_type: flow
+    sign: signed
+    templates: [industrial, reit, telecom, utility]
+    store: [OperatingIncomeLoss]
+    # Deliberately no identity fallback. pretax_income + interest_expense is
+    # the obvious one and it does not work: pretax income also carries interest
+    # income, investment gains and other non-operating items, so adding back
+    # only interest expense lands 4.6% out at the median and within 1% just
+    # 15% of the time. That approximation still earns its place under `ebit`,
+    # where it is labelled as an analytical construct — but this row is a line
+    # off the face of the income statement and only reported values belong in it.
+  interest_expense:
+    label: Interest Expense
+    statement: income_statement
+    period_type: flow
+  pretax_income:
+    label: Pre-Tax Income
+    statement: income_statement
+    role: subtotal
+    period_type: flow
+    sign: signed
+    derive:
+      # Exact only where there is no noncontrolling interest, discontinued
+      # operation or equity-method income between the two lines. Against 3,553
+      # reported values it is exact 48% of the time and within 1% for 67%,
+      # median error 0.14% — good enough to fill a gap, not good enough to
+      # trust blindly, which is why the provenance records it on every value.
+      - expr: net_income + income_tax_expense
+        confidence: low
+  income_tax_expense:
+    label: Income Tax Expense
+    statement: income_statement
+    period_type: flow
+    sign: signed          # a tax benefit is a real negative
+  net_income:
+    label: Net Income
+    statement: income_statement
+    role: total
+    period_type: flow
+    sign: signed
+  eps_basic:
+    label: EPS (Basic)
+    statement: income_statement
+    role: per_share
+    period_type: flow
+    sign: signed
+  eps_diluted:
+    label: EPS (Diluted)
+    statement: income_statement
+    role: per_share
+    period_type: flow
+    sign: signed
+  dividends_per_share:
+    # Declared per share, else cash paid per share (the extractor's choice,
+    # FROM-EXTRACTOR-5). Split-adjusted on the same basis as EPS.
+    label: Dividends per Share
+    statement: income_statement
+    role: per_share
+    period_type: flow
+  shares_basic:
+    label: Weighted Avg Shares (Basic)
+    statement: income_statement
+    role: count
+    period_type: flow     # a weighted average over the period, not a balance
+  shares_diluted:
+    label: Weighted Avg Shares (Diluted)
+    statement: income_statement
+    role: count
+    period_type: flow
+
+  # ======================= BALANCE SHEET ==================================
+  cash_and_equivalents:
+    label: Cash & Equivalents
+    statement: balance_sheet
+  short_term_investments:
+    label: Short-Term Investments
+    statement: balance_sheet
+    templates: [industrial, insurer, telecom, utility]
+  accounts_receivable:
+    label: Accounts Receivable
+    statement: balance_sheet
+    templates: [industrial, reit, telecom, utility]
+  inventory:
+    label: Inventory
+    statement: balance_sheet
+    templates: [industrial, telecom, utility]
+  total_current_assets:
+    label: Total Current Assets
+    statement: balance_sheet
+    role: subtotal
+    templates: [industrial, telecom, utility]
+    store: [AssetsCurrent]
+  ppe_net:
+    label: Property, Plant & Equipment, Net
+    statement: balance_sheet
+  goodwill:
+    label: Goodwill
+    statement: balance_sheet
+  intangible_assets:
+    label: Intangible Assets
+    statement: balance_sheet
+  total_assets:
+    label: Total Assets
+    statement: balance_sheet
+    role: total
+    # An operating company cannot have zero assets. Bank of America's 2008 row
+    # arrives as exactly 0.0 against a true ~1.8tn — a failed tag, not a
+    # balance — and every ratio with assets in the denominator inherits it.
+    # Zero here is read as missing so the store fallback can try instead.
+    zero_is_missing: true
+    store: [Assets]
+  accounts_payable:
+    label: Accounts Payable
+    statement: balance_sheet
+    templates: [industrial, telecom, utility]
+  short_term_debt:
+    label: Short-Term Debt
+    statement: balance_sheet
+    templates: [industrial, insurer, reit, telecom, utility]
+  total_current_liabilities:
+    label: Total Current Liabilities
+    statement: balance_sheet
+    role: subtotal
+    templates: [industrial, telecom, utility]
+    store: [LiabilitiesCurrent]
+  long_term_debt:
+    label: Long-Term Debt
+    statement: balance_sheet
+    # TOTALS in priority order. LongTermDebtAndCapitalLeaseObligations is the
+    # one that matters: thirteen filers report their long-term borrowing only
+    # under that tag, covering 100 of the 170 ticker-years the narrower
+    # concepts miss. Including finance leases is right here — Beneish's
+    # leverage wants total long-term obligations.
+    #
+    # OtherLongTermDebt, SecuredLongTermDebt and ConvertibleLongTermNotesPayable
+    # are deliberately absent: each is a COMPONENT, and picking one up as
+    # though it were the total understates leverage exactly the way the
+    # extractor's own notes warn about for cost of revenue. Maturity-schedule
+    # concepts are excluded for the same reason — they are next year's
+    # repayment, not the balance.
+    store: [LongTermDebtNoncurrent, LongTermDebt,
+            LongTermDebtAndCapitalLeaseObligations, LongTermNotesPayable]
+  total_liabilities:
+    label: Total Liabilities
+    statement: balance_sheet
+    role: total
+    derive:
+      # Only 57% of industrial ticker-years carry a Liabilities tag, but the
+      # balance sheet identity is exact, so this recovers the rest at no cost
+      # in accuracy.
+      - expr: total_assets - total_equity - opt(temporary_equity)
+        confidence: high
+    store: [Liabilities]
+  common_equity:
+    label: Common Equity
+    statement: balance_sheet
+    sign: signed          # McDonald's, Home Depot and Boeing have all run a
+                          # genuinely negative common equity after sustained
+                          # buybacks. This is information, not a bad tag.
+  retained_earnings:
+    label: Retained Earnings
+    statement: balance_sheet
+    sign: signed          # an accumulated deficit is a real negative
+    store: [RetainedEarningsAccumulatedDeficit]
+    # No identity fallback on purpose. total_equity - common_equity looks
+    # plausible and is worthless: the extractor maps common_equity to common
+    # stock at PAR VALUE, not common shareholders' equity, so the difference is
+    # not retained earnings. Measured against 1,188 reported values it agreed
+    # with none of them, median relative error 100%. The store fallback covers
+    # 47 of 48 filers, which is what this item actually needs.
+    # The industrial template never maps this item, which would knock the RE/TA
+    # term out of the Z-Score for 31 of 47 tickers. The concept is present in
+    # the fact store for 47 of 48 CIKs, so the store fallback closes the gap
+    # without touching the extractor.
+  total_equity:
+    label: Total Equity
+    statement: balance_sheet
+    role: total
+    sign: signed
+    derive:
+      - expr: total_assets - total_liabilities - opt(temporary_equity)
+        confidence: high
+    store: [StockholdersEquity, StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest]
+  noncontrolling_interest:
+    label: Noncontrolling Interests
+    statement: balance_sheet
+    sign: signed          # a subsidiary's accumulated losses can leave the
+                          # minority holders' share negative
+  temporary_equity:
+    label: Temporary / Redeemable Equity
+    statement: balance_sheet
+    # Mezzanine: redeemable noncontrolling interests and redeemable preferred,
+    # which belong to neither liabilities nor equity. Most filers have none, so
+    # the identities above read its absence as zero; where it exists (REITs
+    # above all) leaving it out would count it as a liability. The extractor's
+    # own total_liabilities derivation subtracts it the same way.
+  total_liabilities_and_equity:
+    label: Total Liabilities & Equity
+    statement: balance_sheet
+    role: total
+    zero_is_missing: true   # it equals total assets, so the same applies
+  shares_outstanding:
+    label: Shares Outstanding
+    statement: balance_sheet
+    role: count
+    store: [EntityCommonStockSharesOutstanding, CommonStockSharesOutstanding]
+
+  # ======================= CASH FLOW ======================================
+  cash_from_operations:
+    label: Cash from Operations
+    statement: cash_flow
+    role: total
+    period_type: flow
+    sign: signed
+  cash_from_investing:
+    label: Cash from Investing
+    statement: cash_flow
+    role: total
+    period_type: flow
+    sign: signed
+  cash_from_financing:
+    label: Cash from Financing
+    statement: cash_flow
+    role: total
+    period_type: flow
+    sign: signed
+  depreciation_amortization:
+    label: Depreciation & Amortization
+    statement: cash_flow
+    period_type: flow
+    store: [DepreciationDepletionAndAmortization, DepreciationAmortizationAndAccretionNet]
+  stock_based_compensation:
+    label: Stock-Based Compensation
+    statement: cash_flow
+    period_type: flow
+  capital_expenditures:
+    label: Capital Expenditures
+    statement: cash_flow
+    period_type: flow
+    templates: [industrial, reit, telecom, utility]
+  acquisitions:
+    label: Acquisitions, Net of Cash
+    statement: cash_flow
+    period_type: flow
+    sign: signed          # net of cash acquired, so a cash-rich target or a
+                          # netted divestiture legitimately turns this negative
+    templates: [industrial, insurer, reit, telecom, utility]
+  dividends_paid:
+    label: Dividends Paid
+    statement: cash_flow
+    period_type: flow
+  share_repurchases:
+    label: Share Repurchases
+    statement: cash_flow
+    period_type: flow
+
+  # ======================= BANK ===========================================
+  interest_income:
+    label: Interest Income
+    statement: income_statement
+    period_type: flow
+    templates: [bank]
+  interest_income_loans:
+    label: Interest Income — Loans
+    statement: income_statement
+    period_type: flow
+    templates: [bank]
+  interest_expense_deposits:
+    label: Interest Expense — Deposits
+    statement: income_statement
+    period_type: flow
+    templates: [bank]
+  net_interest_income:
+    label: Net Interest Income
+    statement: income_statement
+    role: subtotal
+    period_type: flow
+    sign: signed
+    templates: [bank]
+    derive:
+      - expr: interest_income - interest_expense
+        confidence: high
+  provision_credit_losses:
+    label: Provision for Credit Losses
+    statement: income_statement
+    period_type: flow
+    sign: signed          # a release of reserves is a real negative
+    templates: [bank]
+  noninterest_income:
+    label: Non-Interest Income
+    statement: income_statement
+    period_type: flow
+    sign: signed
+    templates: [bank]
+  noninterest_expense:
+    label: Non-Interest Expense
+    statement: income_statement
+    period_type: flow
+    templates: [bank]
+  loans_net:
+    label: Loans, Net
+    statement: balance_sheet
+    templates: [bank]
+  allowance_credit_losses:
+    label: Allowance for Credit Losses
+    statement: balance_sheet
+    templates: [bank]
+  deposits:
+    label: Total Deposits
+    statement: balance_sheet
+    templates: [bank]
+  interest_bearing_deposits:
+    label: Interest-Bearing Deposits
+    statement: balance_sheet
+    templates: [bank]
+  time_deposits:
+    label: Time Deposits
+    statement: balance_sheet
+    templates: [bank]
+  short_term_borrowings:
+    label: Short-Term Borrowings
+    statement: balance_sheet
+    templates: [bank]
+  fed_funds_sold:
+    label: Fed Funds Sold
+    statement: balance_sheet
+    templates: [bank]
+  trading_assets:
+    label: Trading Assets
+    statement: balance_sheet
+    templates: [bank]
+  trading_liabilities:
+    label: Trading Liabilities
+    statement: balance_sheet
+    templates: [bank]
+  htm_securities:
+    label: Held-to-Maturity Securities
+    statement: balance_sheet
+    templates: [bank]
+  afs_securities:
+    label: Available-for-Sale Securities
+    statement: balance_sheet
+    templates: [bank, insurer]
+  change_in_deposits:
+    label: Change in Deposits
+    statement: cash_flow
+    period_type: flow
+    sign: signed
+    templates: [bank]
+  interest_paid:
+    label: Interest Paid
+    statement: cash_flow
+    period_type: flow
+    templates: [bank, utility]
+
+  # ======================= INSURER ========================================
+  premiums_earned:
+    label: Premiums Earned
+    statement: income_statement
+    period_type: flow
+    templates: [insurer]
+  premiums_direct:
+    label: Direct Premiums Written
+    statement: income_statement
+    period_type: flow
+    templates: [insurer]
+  premiums_ceded:
+    label: Premiums Ceded
+    statement: income_statement
+    period_type: flow
+    templates: [insurer]
+  losses_incurred:
+    label: Losses & LAE Incurred
+    statement: income_statement
+    period_type: flow
+    sign: signed          # favourable prior-year development can turn this negative
+    templates: [insurer]
+  underwriting_expenses:
+    label: Underwriting Expenses
+    statement: income_statement
+    period_type: flow
+    templates: [insurer]
+  net_investment_income:
+    label: Net Investment Income
+    statement: income_statement
+    period_type: flow
+    sign: signed
+    templates: [insurer]
+  realized_gains:
+    label: Realized Investment Gains
+    statement: income_statement
+    period_type: flow
+    sign: signed
+    templates: [insurer]
+  investments_total:
+    label: Total Investments
+    statement: balance_sheet
+    templates: [insurer]
+  afs_amortized_cost:
+    label: AFS Securities at Amortized Cost
+    statement: balance_sheet
+    templates: [insurer]
+  deferred_acquisition_costs:
+    label: Deferred Acquisition Costs
+    statement: balance_sheet
+    templates: [insurer]
+  loss_reserves:
+    label: Loss & LAE Reserves
+    statement: balance_sheet
+    templates: [insurer]
+  unearned_premiums:
+    label: Unearned Premiums
+    statement: balance_sheet
+    templates: [insurer]
+  losses_paid:
+    label: Losses Paid
+    statement: cash_flow
+    period_type: flow
+    templates: [insurer]
+  other_assets:
+    label: Other Assets
+    statement: balance_sheet
+    templates: [bank, insurer, utility]
+
+  # ======================= REIT ===========================================
+  rental_revenue:
+    label: Rental Revenue
+    statement: income_statement
+    period_type: flow
+    templates: [reit]
+  property_operating_expense:
+    label: Property Operating Expense
+    statement: income_statement
+    period_type: flow
+    templates: [reit]
+  depreciation_expense:
+    label: Depreciation Expense
+    statement: income_statement
+    period_type: flow
+    templates: [reit]
+  gain_on_sale:
+    label: Gain on Sale of Real Estate
+    statement: income_statement
+    period_type: flow
+    sign: signed
+    templates: [reit]
+  real_estate_gross:
+    label: Real Estate, at Cost
+    statement: balance_sheet
+    templates: [reit]
+  accumulated_depreciation:
+    label: Accumulated Depreciation
+    statement: balance_sheet
+    templates: [reit]
+  future_rent_receivable:
+    label: Straight-Line Rent Receivable
+    statement: balance_sheet
+    templates: [reit]
+  mortgage_debt:
+    label: Mortgage Debt
+    statement: balance_sheet
+    templates: [reit]
+  operating_lease_rou:
+    label: Operating Lease Right-of-Use Asset
+    statement: balance_sheet
+    templates: [reit, utility]
+  operating_lease_liability:
+    label: Operating Lease Liability
+    statement: balance_sheet
+    templates: [reit, utility]
+
+  # ================= TAX, EQUITY AND SHARE DETAIL =========================
+  # Concepts the extractor mapped once it went looking for widely-reported
+  # tags it was missing. Each is reported by most filers of every type.
+  accumulated_oci:
+    label: Accumulated Other Comprehensive Income
+    statement: balance_sheet
+    sign: signed          # usually a loss, and legitimately so — unrealised
+                          # marks on securities and pension remeasurements
+  comprehensive_income:
+    label: Comprehensive Income
+    statement: income_statement
+    role: total
+    period_type: flow
+    sign: signed
+  pretax_income_domestic:
+    label: Pre-Tax Income — Domestic
+    statement: income_statement
+    period_type: flow
+    sign: signed
+  pretax_income_foreign:
+    label: Pre-Tax Income — Foreign
+    statement: income_statement
+    period_type: flow
+    sign: signed
+  deferred_income_tax:
+    label: Deferred Income Tax Expense
+    statement: cash_flow
+    period_type: flow
+    sign: signed          # a deferred benefit is a real negative
+  income_taxes_paid:
+    label: Income Taxes Paid
+    statement: cash_flow
+    period_type: flow
+  shares_issued:
+    label: Shares Issued
+    statement: balance_sheet
+    role: count
+    # Deliberately NOT a fallback for shares_outstanding. For a filer holding
+    # treasury stock the two differ enormously — Coca-Cola issued 7.04bn
+    # against 4.30bn outstanding — and conflating them overstated market
+    # capitalisation by 64%. Kept as its own row so the difference is visible.
+  shares_outstanding_cover:
+    label: Shares Outstanding (cover page)
+    statement: balance_sheet
+    role: count
+    # dei:EntityCommonStockSharesOutstanding. The right concept but dated to
+    # the filing's cover page rather than the balance sheet date, so it rarely
+    # lands on a period end. Useful as a cross-check, not as a substitute.
+
+  # ========================== UTILITY =====================================
+  regulatory_assets:
+    label: Regulatory Assets
+    statement: balance_sheet
+    templates: [utility]
+  regulatory_liabilities:
+    label: Regulatory Liabilities
+    statement: balance_sheet
+    templates: [utility]
+  decommissioning_fund:
+    label: Nuclear Decommissioning Fund
+    statement: balance_sheet
+    templates: [utility]
+  asset_retirement_obligation:
+    label: Asset Retirement Obligation
+    statement: balance_sheet
+    templates: [utility]
+  construction_work_in_progress:
+    label: Construction Work in Progress
+    statement: balance_sheet
+    templates: [utility]
+  deferred_tax_liabilities:
+    label: Deferred Tax Liabilities
+    statement: balance_sheet
+    templates: [utility]
+  ppe_gross:
+    label: Property, Plant & Equipment, Gross
+    statement: balance_sheet
+    templates: [utility]
+  proceeds_from_long_term_debt:
+    label: Proceeds from Long-Term Debt
+    statement: cash_flow
+    period_type: flow
+    templates: [utility]
+  repayments_of_long_term_debt:
+    label: Repayments of Long-Term Debt
+    statement: cash_flow
+    period_type: flow
+    templates: [utility]
+  proceeds_from_common_stock:
+    label: Proceeds from Common Stock
+    statement: cash_flow
+    period_type: flow
+    templates: [utility]
+
+  # ========================== TELECOM =====================================
+  spectrum_licences:
+    label: Spectrum Licences
+    statement: balance_sheet
+    templates: [telecom]
+
+  # ======================= DERIVED AGGREGATES =============================
+  # No panel source at all — these exist only as identities. They live in the
+  # same registry so the evaluator, the provenance trail and the UI treat them
+  # exactly like reported items.
+  total_debt:
+    label: Total Debt
+    statement: derived
+    role: subtotal
+    derive:
+      # opt() on the short-term leg: a filer with no short-term debt line
+      # generally has none, whereas a missing long-term leg means the capital
+      # structure is genuinely unknown and total debt should stay unknown.
+      - expr: opt(short_term_debt) + long_term_debt
+        confidence: medium
+      - expr: opt(short_term_borrowings) + long_term_debt
+        confidence: medium
+  net_debt:
+    label: Net Debt
+    statement: derived
+    role: subtotal
+    sign: signed          # net cash is a real, and common, negative
+    derive:
+      - expr: total_debt - cash_and_equivalents - opt(short_term_investments)
+        confidence: medium
+  working_capital:
+    label: Working Capital
+    statement: derived
+    role: subtotal
+    sign: signed
+    templates: [industrial, utility, telecom]
+    derive:
+      - expr: total_current_assets - total_current_liabilities
+        confidence: high
+  ebit:
+    label: EBIT
+    statement: derived
+    role: subtotal
+    period_type: flow
+    sign: signed
+    derive:
+      - expr: operating_income
+        confidence: high
+      # The fallback, and the reason it lives here rather than on
+      # operating_income: EBIT is an analytical construct, so a documented
+      # approximation is appropriate. Median error 4.6% against reported
+      # operating income — wide of a statement line, comfortably inside the
+      # Z-Score's 1.1 / 2.6 bands.
+      - expr: pretax_income + interest_expense
+        confidence: low
+  ebitda:
+    label: EBITDA
+    statement: derived
+    role: subtotal
+    period_type: flow
+    sign: signed
+    derive:
+      - expr: ebit + depreciation_amortization
+        confidence: medium
+  free_cash_flow:
+    label: Free Cash Flow
+    statement: derived
+    role: subtotal
+    period_type: flow
+    sign: signed
+    derive:
+      # capital_expenditures is a positive magnitude (a PaymentsTo concept),
+      # so it subtracts. Verified against the panel, not assumed.
+      - expr: cash_from_operations - capital_expenditures
+        confidence: high
+  invested_capital:
+    label: Invested Capital
+    statement: derived
+    role: subtotal
+    sign: signed
+    derive:
+      - expr: total_debt + total_equity - cash_and_equivalents
+        confidence: medium
+  net_ppe_and_intangibles:
+    label: Net PP&E, Goodwill & Intangibles
+    statement: derived
+    role: subtotal
+    derive:
+      - expr: ppe_net + opt(goodwill) + opt(intangible_assets)
+        confidence: medium

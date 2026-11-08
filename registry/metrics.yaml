@@ -1,0 +1,940 @@
+# Metric catalog.
+#
+# Adding a metric is an entry here, not code. The engine evaluates `expr` over
+# the curated item frame, the dashboard discovers what exists by reading this
+# file, and nothing needs editing in between.
+#
+# FIELDS
+#   label        display name
+#   family       grouping in the UI: growth, profitability, returns, liquidity,
+#                leverage, efficiency, cash_quality, valuation, forensic, bank,
+#                insurer, reit
+#   expr         arithmetic over item codes and other metric ids. Supports
+#                  lag(x, n)      the value n periods earlier, per company
+#                  opt(x)         missing counts as zero
+#                  coalesce(a, b) first available
+#                  a > b          1.0 or 0.0, for scoring models
+#   applies_to   templates the metric is valid for. A bank has no gross margin
+#                and no inventory; a combined ratio is meaningless outside
+#                insurance. Restricting here is what stops the screener
+#                offering nonsense.
+#   frequency    annual | quarterly | ttm
+#   format       percent | ratio | times | days | score | currency
+#   direction    higher_better | lower_better | neutral — drives conditional
+#                colour, and is deliberately absent where "good" depends on
+#                context
+#   bands        named thresholds, evaluated in order; the first whose `max` is
+#                not exceeded wins
+#   requires     extra inputs beyond the item frame, currently only `market`
+#
+# A note on frequency. Ratios of one flow to another (margins) are valid at any
+# frequency. Ratios of a flow to a BALANCE (ROA, turnover) are annualised
+# quantities: computing them on a single quarter understates them roughly
+# fourfold. Those are restricted to [annual, ttm], where the numerator covers a
+# full year. This is the single most common way a ratio dashboard misleads.
+
+defaults:
+  frequency: [annual, ttm]
+  applies_to: [industrial, bank, insurer, reit, utility, telecom]
+  format: ratio
+  direction: neutral
+
+metrics:
+
+  # ============================ GROWTH ==================================
+  revenue_growth:
+    label: Revenue Growth
+    family: growth
+    expr: revenue / lag(revenue, 1) - 1
+    frequency: [annual, ttm, quarterly]
+    format: percent
+    direction: higher_better
+  ebitda_growth:
+    label: EBITDA Growth
+    family: growth
+    expr: ebitda / lag(ebitda, 1) - 1
+    format: percent
+    direction: higher_better
+  net_income_growth:
+    label: Net Income Growth
+    family: growth
+    expr: net_income / lag(net_income, 1) - 1
+    format: percent
+    direction: higher_better
+    # Meaningless when the base year is a loss: -100 to +50 is not "growth".
+    guard: lag(net_income, 1) > 0
+  eps_growth:
+    label: Diluted EPS Growth
+    family: growth
+    expr: eps_diluted / lag(eps_diluted, 1) - 1
+    format: percent
+    direction: higher_better
+    guard: lag(eps_diluted, 1) > 0
+  fcf_growth:
+    label: Free Cash Flow Growth
+    family: growth
+    expr: free_cash_flow / lag(free_cash_flow, 1) - 1
+    format: percent
+    direction: higher_better
+    applies_to: [industrial, reit, utility, telecom]
+    guard: lag(free_cash_flow, 1) > 0
+  asset_growth:
+    label: Total Asset Growth
+    family: growth
+    expr: total_assets / lag(total_assets, 1) - 1
+    format: percent
+    direction: neutral      # rapid asset growth is as often a warning as a win
+
+  # ========================= PROFITABILITY ==============================
+  gross_margin:
+    label: Gross Margin
+    family: profitability
+    expr: gross_profit / revenue
+    applies_to: [industrial]
+    frequency: [annual, ttm, quarterly]
+    format: percent
+    direction: higher_better
+  operating_margin:
+    label: Operating Margin
+    family: profitability
+    expr: ebit / revenue
+    applies_to: [industrial, reit, utility, telecom]
+    frequency: [annual, ttm, quarterly]
+    format: percent
+    direction: higher_better
+  ebitda_margin:
+    label: EBITDA Margin
+    family: profitability
+    expr: ebitda / revenue
+    applies_to: [industrial, reit, utility, telecom]
+    frequency: [annual, ttm, quarterly]
+    format: percent
+    direction: higher_better
+  net_margin:
+    label: Net Margin
+    family: profitability
+    expr: net_income / revenue
+    frequency: [annual, ttm, quarterly]
+    format: percent
+    direction: higher_better
+  rnd_intensity:
+    label: R&D Intensity
+    family: profitability
+    expr: research_development / revenue
+    applies_to: [industrial]
+    format: percent
+    direction: neutral
+  sga_ratio:
+    label: SG&A to Revenue
+    family: profitability
+    expr: selling_general_admin / revenue
+    format: percent
+    direction: lower_better
+  effective_tax_rate:
+    label: Effective Tax Rate
+    family: profitability
+    expr: income_tax_expense / pretax_income
+    format: percent
+    direction: neutral
+    guard: pretax_income > 0
+
+  # ============================ RETURNS =================================
+  # Flow-over-balance, so annual or TTM only, and against AVERAGE balances:
+  # a company that doubled its assets mid-year has not earned the year's
+  # profit on the closing balance sheet.
+  roa:
+    label: Return on Assets
+    family: returns
+    expr: net_income / ((total_assets + lag(total_assets, 1)) / 2)
+    format: percent
+    direction: higher_better
+  roe:
+    label: Return on Equity
+    family: returns
+    expr: net_income / ((total_equity + lag(total_equity, 1)) / 2)
+    format: percent
+    direction: higher_better
+    # Negative equity makes the ratio flip sign and read as spectacular.
+    guard: total_equity > 0
+  roic:
+    label: Return on Invested Capital
+    family: returns
+    expr: (ebit * (1 - coalesce(effective_tax_rate, 0.21)))
+          / ((invested_capital + lag(invested_capital, 1)) / 2)
+    applies_to: [industrial, reit, utility, telecom]
+    format: percent
+    direction: higher_better
+    guard: invested_capital > 0
+  rota:
+    label: Return on Tangible Assets
+    family: returns
+    expr: net_income / (total_assets - opt(goodwill) - opt(intangible_assets))
+    format: percent
+    direction: higher_better
+
+  # =========================== LIQUIDITY ================================
+  current_ratio:
+    label: Current Ratio
+    family: liquidity
+    expr: total_current_assets / total_current_liabilities
+    applies_to: [industrial, utility, telecom]
+    frequency: [annual, ttm, quarterly]
+    format: times
+    direction: higher_better
+    bands:
+      - {max: 1.0, label: Tight, tone: negative}
+      - {max: 2.0, label: Adequate, tone: warning}
+      - {label: Comfortable, tone: positive}
+  quick_ratio:
+    label: Quick Ratio
+    family: liquidity
+    expr: (total_current_assets - opt(inventory)) / total_current_liabilities
+    applies_to: [industrial, utility, telecom]
+    format: times
+    direction: higher_better
+  cash_ratio:
+    label: Cash Ratio
+    family: liquidity
+    expr: (cash_and_equivalents + opt(short_term_investments)) / total_current_liabilities
+    applies_to: [industrial, utility, telecom]
+    format: times
+    direction: higher_better
+
+  # =========================== LEVERAGE =================================
+  debt_to_equity:
+    label: Debt to Equity
+    family: leverage
+    expr: total_debt / total_equity
+    format: times
+    direction: lower_better
+    guard: total_equity > 0
+  debt_to_assets:
+    label: Debt to Assets
+    family: leverage
+    expr: total_debt / total_assets
+    format: percent
+    direction: lower_better
+  net_debt_to_ebitda:
+    label: Net Debt / EBITDA
+    family: leverage
+    expr: net_debt / ebitda
+    applies_to: [industrial, reit, utility, telecom]
+    format: times
+    direction: lower_better
+    guard: ebitda > 0
+    bands:
+      - {max: 1.0, label: Conservative, tone: positive}
+      - {max: 3.0, label: Moderate, tone: warning}
+      - {label: Stretched, tone: negative}
+  interest_coverage:
+    label: Interest Coverage
+    family: leverage
+    expr: ebit / interest_expense
+    applies_to: [industrial, reit, utility, telecom]
+    format: times
+    direction: higher_better
+    guard: interest_expense > 0
+    bands:
+      - {max: 1.5, label: Fragile, tone: negative}
+      - {max: 4.0, label: Adequate, tone: warning}
+      - {label: Strong, tone: positive}
+  equity_multiplier:
+    label: Equity Multiplier
+    family: leverage
+    expr: total_assets / total_equity
+    format: times
+    direction: lower_better
+    guard: total_equity > 0
+
+  # ========================== EFFICIENCY ================================
+  asset_turnover:
+    label: Asset Turnover
+    family: efficiency
+    expr: revenue / ((total_assets + lag(total_assets, 1)) / 2)
+    format: times
+    direction: higher_better
+  dso:
+    label: Days Sales Outstanding
+    family: efficiency
+    expr: 365 * ((accounts_receivable + lag(accounts_receivable, 1)) / 2) / revenue
+    applies_to: [industrial, reit, utility, telecom]
+    format: days
+    direction: lower_better
+    guard: revenue > 0
+  dio:
+    label: Days Inventory Outstanding
+    family: efficiency
+    expr: 365 * ((inventory + lag(inventory, 1)) / 2) / cost_of_revenue
+    applies_to: [industrial]
+    format: days
+    direction: lower_better
+    guard: cost_of_revenue > 0
+  dpo:
+    label: Days Payable Outstanding
+    family: efficiency
+    expr: 365 * ((accounts_payable + lag(accounts_payable, 1)) / 2) / cost_of_revenue
+    applies_to: [industrial]
+    format: days
+    direction: higher_better
+    guard: cost_of_revenue > 0
+  cash_conversion_cycle:
+    label: Cash Conversion Cycle
+    family: efficiency
+    expr: dso + dio - dpo
+    applies_to: [industrial]
+    format: days
+    direction: lower_better
+
+  # ========================= CASH QUALITY ===============================
+  fcf_margin:
+    label: Free Cash Flow Margin
+    family: cash_quality
+    expr: free_cash_flow / revenue
+    applies_to: [industrial, reit, utility, telecom]
+    format: percent
+    direction: higher_better
+  fcf_conversion:
+    label: FCF Conversion
+    family: cash_quality
+    expr: free_cash_flow / net_income
+    applies_to: [industrial, reit, utility, telecom]
+    format: percent
+    direction: higher_better
+    guard: net_income > 0
+  cash_return_on_assets:
+    label: Cash Return on Assets
+    family: cash_quality
+    expr: cash_from_operations / ((total_assets + lag(total_assets, 1)) / 2)
+    format: percent
+    direction: higher_better
+  accruals_ratio:
+    label: Accruals Ratio (Sloan)
+    family: cash_quality
+    expr: (net_income - cash_from_operations)
+          / ((total_assets + lag(total_assets, 1)) / 2)
+    format: percent
+    direction: lower_better
+    description: >
+      Earnings not backed by cash, scaled by assets. Sloan (1996) showed the
+      accrual component of earnings persists far less than the cash component,
+      so a high reading is a warning about next year's earnings rather than a
+      judgement on this year's.
+    bands:
+      - {max: 0.05, label: Cash-backed, tone: positive}
+      - {max: 0.10, label: Elevated, tone: warning}
+      - {label: Aggressive, tone: negative}
+  capex_intensity:
+    label: Capex to Revenue
+    family: cash_quality
+    expr: capital_expenditures / revenue
+    applies_to: [industrial, reit, utility, telecom]
+    format: percent
+    direction: neutral
+  sbc_to_revenue:
+    label: Stock Comp to Revenue
+    family: cash_quality
+    expr: stock_based_compensation / revenue
+    format: percent
+    direction: lower_better
+  buyback_yield_book:
+    label: Buybacks to Operating Cash Flow
+    family: cash_quality
+    expr: share_repurchases / cash_from_operations
+    format: percent
+    direction: neutral
+    guard: cash_from_operations > 0
+  dividend_payout:
+    label: Dividend Payout Ratio
+    family: cash_quality
+    expr: dividends_paid / net_income
+    format: percent
+    direction: neutral
+    guard: net_income > 0
+
+  # ========================== VALUATION =================================
+  # These need the price cache. Without it they are absent rather than wrong,
+  # and the dashboard says so.
+  enterprise_value:
+    label: Enterprise Value
+    family: valuation
+    expr: market_cap + coalesce(net_debt, 0)
+    requires: [market]
+    format: currency
+    direction: neutral
+  pe_ratio:
+    label: P/E
+    family: valuation
+    expr: market_cap / net_income
+    requires: [market]
+    format: times
+    direction: lower_better
+    guard: net_income > 0
+  price_to_book:
+    label: Price / Book
+    family: valuation
+    expr: market_cap / total_equity
+    requires: [market]
+    format: times
+    direction: lower_better
+    guard: total_equity > 0
+  price_to_sales:
+    label: Price / Sales
+    family: valuation
+    expr: market_cap / revenue
+    requires: [market]
+    format: times
+    direction: lower_better
+    guard: revenue > 0
+  price_to_tangible_book:
+    label: Price / Tangible Book
+    family: valuation
+    expr: market_cap / (total_equity - opt(goodwill) - opt(intangible_assets))
+    requires: [market]
+    format: times
+    direction: lower_better
+  ev_to_ebitda:
+    label: EV / EBITDA
+    family: valuation
+    expr: enterprise_value / ebitda
+    applies_to: [industrial, reit, utility, telecom]
+    requires: [market]
+    format: times
+    direction: lower_better
+    guard: ebitda > 0
+  ev_to_sales:
+    label: EV / Sales
+    family: valuation
+    expr: enterprise_value / revenue
+    applies_to: [industrial, reit, utility, telecom]
+    requires: [market]
+    format: times
+    direction: lower_better
+    guard: revenue > 0
+  ev_to_ebit:
+    label: EV / EBIT
+    family: valuation
+    expr: enterprise_value / ebit
+    applies_to: [industrial, reit, utility, telecom]
+    requires: [market]
+    format: times
+    direction: lower_better
+    guard: ebit > 0
+  fcf_yield:
+    label: Free Cash Flow Yield
+    family: valuation
+    expr: free_cash_flow / market_cap
+    applies_to: [industrial, reit, utility, telecom]
+    requires: [market]
+    format: percent
+    direction: higher_better
+  earnings_yield:
+    label: Earnings Yield
+    family: valuation
+    expr: net_income / market_cap
+    requires: [market]
+    format: percent
+    direction: higher_better
+  dividend_yield:
+    label: Dividend Yield
+    family: valuation
+    expr: dividends_paid / market_cap
+    requires: [market]
+    format: percent
+    direction: higher_better
+
+  # =========================== FORENSIC =================================
+  # Every metric below whose label carries a model prefix (Z:, M:, F:) is a
+  # TERM IN A FORMULA, not a measure anyone would read on its own. Each is
+  # therefore scoped to exactly the templates of the score it feeds — a
+  # component computed for a company whose score is not is an orphan value:
+  # never consumed, and offered in the UI as though it meant something.
+  # tests/test_metrics.py enforces this.
+  # Altman Z-Score. Three variants exist because the original was fitted on
+  # public MANUFACTURERS, and applying those coefficients elsewhere is not
+  # conservative, it is simply wrong. None of them are defined for banks or
+  # insurers: the models assume a working-capital cycle and an asset base that
+  # a balance sheet of loans or policy reserves does not have.
+  z_working_capital:
+    label: "Z: Working Capital / Assets"
+    family: forensic
+    expr: working_capital / total_assets
+    applies_to: [industrial, utility, telecom]
+    format: ratio
+  z_retained_earnings:
+    label: "Z: Retained Earnings / Assets"
+    family: forensic
+    expr: retained_earnings / total_assets
+    applies_to: [industrial, utility, telecom]
+    format: ratio
+  z_ebit:
+    label: "Z: EBIT / Assets"
+    family: forensic
+    expr: ebit / total_assets
+    applies_to: [industrial, utility, telecom]
+    format: ratio
+  z_equity_to_liabilities:
+    label: "Z: Market Equity / Liabilities"
+    family: forensic
+    expr: market_cap / total_liabilities
+    applies_to: [industrial]
+    requires: [market]
+    format: ratio
+  z_book_equity_to_liabilities:
+    label: "Z: Book Equity / Liabilities"
+    family: forensic
+    expr: total_equity / total_liabilities
+    applies_to: [industrial, utility, telecom]
+    format: ratio
+  z_asset_turnover:
+    label: "Z: Sales / Assets"
+    family: forensic
+    expr: revenue / total_assets
+    applies_to: [industrial]
+    format: ratio
+
+  altman_z:
+    label: Altman Z-Score
+    family: forensic
+    expr: 1.2 * z_working_capital + 1.4 * z_retained_earnings
+          + 3.3 * z_ebit + 0.6 * z_equity_to_liabilities
+          + 1.0 * z_asset_turnover
+    applies_to: [industrial]
+    requires: [market]
+    format: score
+    direction: higher_better
+    description: >
+      The 1968 original, for listed manufacturers. Uses the MARKET value of
+      equity against book liabilities, which is why it needs the price cache.
+    bands:
+      - {max: 1.81, label: Distress, tone: negative}
+      - {max: 2.99, label: Grey zone, tone: warning}
+      - {label: Safe, tone: positive}
+  altman_z_prime:
+    label: Altman Z'-Score
+    family: forensic
+    expr: 0.717 * z_working_capital + 0.847 * z_retained_earnings
+          + 3.107 * z_ebit + 0.420 * z_book_equity_to_liabilities
+          + 0.998 * z_asset_turnover
+    applies_to: [industrial]
+    format: score
+    direction: higher_better
+    description: >
+      Altman's refitting for private firms, substituting book equity for market
+      equity. Available without prices, and the honest choice for any period
+      where the market value is missing.
+    bands:
+      - {max: 1.23, label: Distress, tone: negative}
+      - {max: 2.90, label: Grey zone, tone: warning}
+      - {label: Safe, tone: positive}
+  altman_z_double_prime:
+    label: Altman Z''-Score
+    family: forensic
+    expr: 6.56 * z_working_capital + 3.26 * z_retained_earnings
+          + 6.72 * z_ebit + 1.05 * z_book_equity_to_liabilities
+    applies_to: [industrial, utility, telecom]
+    format: score
+    direction: higher_better
+    description: >
+      The four-variable model for non-manufacturers. Drops the sales/assets
+      term, which otherwise penalises asset-heavy and service businesses for
+      the shape of their industry rather than their solvency.
+    bands:
+      - {max: 1.1, label: Distress, tone: negative}
+      - {max: 2.6, label: Grey zone, tone: warning}
+      - {label: Safe, tone: positive}
+
+  # Beneish M-Score. Eight indices, each comparing this year's ratio to last
+  # year's, so every one needs a prior period and the first year of any company
+  # is necessarily blank.
+  beneish_dsri:
+    label: "M: Days Sales in Receivables"
+    family: forensic
+    expr: (accounts_receivable / revenue)
+          / (lag(accounts_receivable, 1) / lag(revenue, 1))
+    applies_to: [industrial]
+    format: ratio
+  beneish_gmi:
+    label: "M: Gross Margin Index"
+    family: forensic
+    # Written on gross_profit rather than revenue - cost_of_revenue. The two
+    # are arithmetically identical wherever both exist, but the sets differ:
+    # eighteen ticker-years report a gross profit and no cost line, and this
+    # form picks them up. Deteriorating margin pushes the index above 1.
+    expr: (lag(gross_profit, 1) / lag(revenue, 1)) / (gross_profit / revenue)
+    applies_to: [industrial]
+    format: ratio
+  beneish_aqi:
+    label: "M: Asset Quality Index"
+    family: forensic
+    expr: ((1 - (total_current_assets + ppe_net) / total_assets)
+           / (1 - (lag(total_current_assets, 1) + lag(ppe_net, 1)) / lag(total_assets, 1)))
+    applies_to: [industrial]
+    format: ratio
+    description: >
+      Beneish's original adds long-term securities to the "hard" asset base.
+      The extractor maps no such item, so this uses current assets plus net
+      PP&E alone; the index is directionally right but not identical to a
+      textbook calculation.
+  beneish_sgi:
+    label: "M: Sales Growth Index"
+    family: forensic
+    expr: revenue / lag(revenue, 1)
+    applies_to: [industrial]
+    format: ratio
+  beneish_depi:
+    label: "M: Depreciation Index"
+    family: forensic
+    expr: (lag(depreciation_amortization, 1)
+           / (lag(depreciation_amortization, 1) + lag(ppe_net, 1)))
+          / (depreciation_amortization / (depreciation_amortization + ppe_net))
+    applies_to: [industrial]
+    format: ratio
+  beneish_sgai:
+    label: "M: SG&A Index"
+    family: forensic
+    expr: (selling_general_admin / revenue)
+          / (lag(selling_general_admin, 1) / lag(revenue, 1))
+    applies_to: [industrial]
+    format: ratio
+  beneish_tata:
+    label: "M: Total Accruals to Assets"
+    family: forensic
+    expr: (net_income - cash_from_operations) / total_assets
+    applies_to: [industrial]
+    format: ratio
+  beneish_lvgi:
+    label: "M: Leverage Index"
+    family: forensic
+    # Beneish defines leverage as (current liabilities + total LONG-TERM debt)
+    # over total assets. This previously used total_debt, which is short-term
+    # plus long-term — and short-term debt already sits inside current
+    # liabilities, in 100% of the 440 ticker-years where both are reported. It
+    # was counted twice, overstating leverage for every company carrying any.
+    expr: ((long_term_debt + total_current_liabilities) / total_assets)
+          / ((lag(long_term_debt, 1) + lag(total_current_liabilities, 1)) / lag(total_assets, 1))
+    applies_to: [industrial]
+    format: ratio
+
+  beneish_m:
+    label: Beneish M-Score
+    family: forensic
+    expr: -4.84 + 0.920 * beneish_dsri + 0.528 * beneish_gmi
+          + 0.404 * beneish_aqi + 0.892 * beneish_sgi
+          + 0.115 * beneish_depi - 0.172 * beneish_sgai
+          + 4.679 * beneish_tata - 0.327 * beneish_lvgi
+    applies_to: [industrial]
+    frequency: [annual]
+    format: score
+    direction: lower_better
+    description: >
+      Beneish's earnings-manipulation model, fitted on annual data — it is not
+      defined quarter to quarter and is not computed there. A reading above
+      -1.78 puts a company in the range where manipulators were more common in
+      the original sample. That is a flag to go and read the filing, not a
+      finding.
+    bands:
+      - {max: -2.22, label: Unlikely, tone: positive}
+      - {max: -1.78, label: Watch, tone: warning}
+      - {label: Flagged, tone: negative}
+
+  # Piotroski F-Score: nine binary tests of fundamental improvement.
+  piotroski_roa_positive:
+    label: "F: Positive ROA"
+    family: forensic
+    expr: net_income > 0
+    applies_to: [industrial]
+    format: score
+  piotroski_cfo_positive:
+    label: "F: Positive Operating Cash Flow"
+    family: forensic
+    expr: cash_from_operations > 0
+    applies_to: [industrial]
+    format: score
+  piotroski_roa_improving:
+    label: "F: ROA Improving"
+    family: forensic
+    expr: (net_income / total_assets) > (lag(net_income, 1) / lag(total_assets, 1))
+    applies_to: [industrial]
+    format: score
+  piotroski_accruals:
+    label: "F: Earnings Backed by Cash"
+    family: forensic
+    expr: cash_from_operations > net_income
+    applies_to: [industrial]
+    format: score
+  piotroski_leverage:
+    label: "F: Leverage Falling"
+    family: forensic
+    expr: (lag(long_term_debt, 1) / lag(total_assets, 1))
+          > (long_term_debt / total_assets)
+    applies_to: [industrial]
+    format: score
+  piotroski_liquidity:
+    label: "F: Current Ratio Improving"
+    family: forensic
+    expr: current_ratio > lag(current_ratio, 1)
+    applies_to: [industrial]
+    format: score
+  piotroski_no_dilution:
+    label: "F: No Share Issuance"
+    family: forensic
+    expr: lag(shares_diluted, 1) >= shares_diluted
+    applies_to: [industrial]
+    format: score
+  piotroski_margin:
+    label: "F: Gross Margin Improving"
+    family: forensic
+    expr: gross_margin > lag(gross_margin, 1)
+    applies_to: [industrial]
+    format: score
+  piotroski_turnover:
+    label: "F: Asset Turnover Improving"
+    family: forensic
+    expr: (revenue / total_assets) > (lag(revenue, 1) / lag(total_assets, 1))
+    applies_to: [industrial]
+    format: score
+
+  piotroski_f:
+    label: Piotroski F-Score
+    family: forensic
+    expr: piotroski_roa_positive + piotroski_cfo_positive
+          + piotroski_roa_improving + piotroski_accruals
+          + piotroski_leverage + piotroski_liquidity
+          + piotroski_no_dilution + piotroski_margin
+          + piotroski_turnover
+    applies_to: [industrial]
+    frequency: [annual]
+    format: score
+    direction: higher_better
+    description: >
+      Nine tests of financial improvement, scored out of nine. Piotroski's
+      point was that it separates winners from losers among CHEAP stocks; on
+      its own it is a quality reading, not a buy signal.
+    bands:
+      - {max: 3, label: Weak, tone: negative}
+      - {max: 6, label: Middling, tone: warning}
+      - {label: Strong, tone: positive}
+
+  # ============================= BANK ===================================
+  net_interest_margin:
+    label: Net Interest Margin
+    family: bank
+    expr: net_interest_income / ((total_assets + lag(total_assets, 1)) / 2)
+    applies_to: [bank]
+    format: percent
+    direction: higher_better
+  efficiency_ratio:
+    label: Efficiency Ratio
+    family: bank
+    expr: noninterest_expense / (net_interest_income + noninterest_income)
+    applies_to: [bank]
+    format: percent
+    direction: lower_better
+    description: >
+      Cost to produce a dollar of revenue. Lower is better, and the direction
+      catches people out — this is the one bank metric where a rising line is
+      bad news.
+    bands:
+      - {max: 0.55, label: Efficient, tone: positive}
+      - {max: 0.70, label: Average, tone: warning}
+      - {label: Costly, tone: negative}
+  loans_to_deposits:
+    label: Loans / Deposits
+    family: bank
+    expr: loans_net / deposits
+    applies_to: [bank]
+    format: percent
+    direction: neutral
+  provision_to_loans:
+    label: Provision / Loans
+    family: bank
+    expr: provision_credit_losses / loans_net
+    applies_to: [bank]
+    format: percent
+    direction: lower_better
+  allowance_coverage:
+    label: Allowance / Loans
+    family: bank
+    expr: allowance_credit_losses / loans_net
+    applies_to: [bank]
+    format: percent
+    direction: neutral
+  equity_to_assets:
+    label: Equity / Assets
+    family: bank
+    expr: total_equity / total_assets
+    applies_to: [bank, insurer]
+    format: percent
+    direction: higher_better
+  noninterest_income_share:
+    label: Fee Income Share
+    family: bank
+    expr: noninterest_income / (net_interest_income + noninterest_income)
+    applies_to: [bank]
+    format: percent
+    direction: neutral
+
+  # ============================ INSURER =================================
+  loss_ratio:
+    label: Loss Ratio
+    family: insurer
+    expr: losses_incurred / premiums_earned
+    applies_to: [insurer]
+    format: percent
+    direction: lower_better
+    # Refuse a figure that cannot be an insurer's loss ratio. Allstate's FY2024
+    # incurred losses arrive as 2.90bn against 41.07bn the year before, on
+    # GROWING premiums: it did not tag the income-statement line that year, so
+    # the extractor's mapping fell through to a claims-development rollforward.
+    # There is no correct value in the fact store to substitute, and a 5% loss
+    # ratio would flow straight into the combined ratio and read as the most
+    # profitable underwriter in the universe. A blank is the honest output.
+    guard: (losses_incurred / premiums_earned > 0.2)
+           * (losses_incurred / premiums_earned < 2.0)
+    description: >
+      Incurred losses over premiums earned, and the one insurance metric that
+      reproduces company-reported figures exactly — Progressive, Travelers and
+      UnitedHealth all match their filed ratios to within a tenth of a point.
+      For a managed-care filer this is the medical loss ratio, which is the
+      directly comparable measure.
+  expense_ratio:
+    label: Expense Ratio
+    family: insurer
+    expr: (coalesce(operating_expenses, losses_incurred + underwriting_expenses)
+           - losses_incurred) / premiums_earned
+    applies_to: [insurer]
+    format: percent
+    direction: lower_better
+    # Only for a filer that actually underwrites. UnitedHealth sits in the
+    # insurer template on its SIC code but is managed care: it reports no
+    # underwriting expense and no deferred acquisition costs in nineteen years
+    # of filings, and its "combined ratio" came out at 119% and was labelled an
+    # underwriting loss. Its medical loss ratio is the comparable measure and
+    # is exact — see loss_ratio.
+    guard: coalesce(underwriting_expenses, deferred_acquisition_costs) > 0
+    description: >
+      Total expenses net of losses, over premiums earned. Deliberately NOT
+      built on the underwriting_expenses tag alone, which captures only policy
+      acquisition costs: that version puts Progressive's 2024 expense ratio at
+      7.6% against a reported 17.4%, and Allstate's at 18.8% against a
+      combined ratio of 94.2%. Measured across nine reported combined ratios
+      from four P&C insurers, the tag-only version is 19.2 points out on
+      average and this one 3.4.
+  combined_ratio:
+    label: Combined Ratio (consolidated)
+    family: insurer
+    expr: loss_ratio + expense_ratio
+    applies_to: [insurer]
+    format: percent
+    direction: lower_better
+    description: >
+      Losses plus expenses over premiums earned. Above 100% the underwriting
+      itself loses money, and the company is relying on investment income to
+      make a profit.
+
+      A CONSOLIDATED GAAP measure, and deliberately not presented as the
+      combined ratio a company reports. The two are not the same thing and
+      cannot be reconciled from these filings: a reported combined ratio covers
+      the property-liability SEGMENT, while consolidated statements fold in
+      life, service and corporate costs. Segment data would close the gap and
+      the extractor writes it to Excel only, so it is not available here.
+
+      Measured against eight reported combined ratios from four P&C insurers,
+      this runs between +1.5 and +5.9 points high, mean +3.5. The bias is
+      consistent in direction, so trends over time and rankings between peers
+      hold; the LEVEL is heavy, and the bands above are shifted to match.
+      Not meaningful at all for a managed-care filer such as UnitedHealth,
+      which has no underwriting expense in the P&C sense — use the loss ratio
+      there instead.
+    # Thresholds shifted +3.5pt from the textbook 95/100 to absorb the
+    # measured bias below. Unshifted, Allstate's 2024 reads 100.1 and gets
+    # called an underwriting loss when the company reported 94.2 and a profit.
+    bands:
+      - {max: 0.985, label: Profitable, tone: positive}
+      - {max: 1.035, label: Marginal, tone: warning}
+      - {label: Underwriting loss, tone: negative}
+  investment_yield:
+    label: Investment Yield
+    family: insurer
+    expr: net_investment_income / ((investments_total + lag(investments_total, 1)) / 2)
+    applies_to: [insurer]
+    format: percent
+    direction: higher_better
+  reserve_to_premium:
+    label: Reserves / Premiums Earned
+    family: insurer
+    expr: loss_reserves / premiums_earned
+    applies_to: [insurer]
+    format: times
+    direction: neutral
+  retention_ratio:
+    label: Premium Retention
+    family: insurer
+    expr: (premiums_direct - premiums_ceded) / premiums_direct
+    applies_to: [insurer]
+    format: percent
+    direction: neutral
+
+  # ============================= REIT ===================================
+  ffo:
+    label: Funds From Operations
+    family: reit
+    expr: net_income + coalesce(depreciation_amortization, depreciation_expense)
+          - opt(gain_on_sale)
+    applies_to: [reit]
+    format: currency
+    direction: higher_better
+    description: >
+      NAREIT's measure: net income with real-estate depreciation added back and
+      property sale gains removed. Depreciation on a building that is
+      appreciating makes GAAP net income close to meaningless for a REIT, which
+      is why the whole sector reports on this instead.
+  affo:
+    label: Adjusted Funds From Operations
+    family: reit
+    expr: ffo - opt(capital_expenditures)
+    applies_to: [reit]
+    format: currency
+    direction: higher_better
+  ffo_margin:
+    label: FFO Margin
+    family: reit
+    expr: ffo / revenue
+    applies_to: [reit]
+    format: percent
+    direction: higher_better
+  ffo_payout:
+    label: FFO Payout Ratio
+    family: reit
+    expr: dividends_paid / ffo
+    applies_to: [reit]
+    format: percent
+    direction: neutral
+    guard: ffo > 0
+    bands:
+      - {max: 0.80, label: Covered, tone: positive}
+      - {max: 1.00, label: Tight, tone: warning}
+      - {label: Uncovered, tone: negative}
+  price_to_ffo:
+    label: Price / FFO
+    family: reit
+    expr: market_cap / ffo
+    applies_to: [reit]
+    requires: [market]
+    format: times
+    direction: lower_better
+    guard: ffo > 0
+  debt_to_real_estate:
+    label: Debt / Gross Real Estate
+    family: reit
+    expr: total_debt / real_estate_gross
+    applies_to: [reit]
+    format: percent
+    direction: lower_better
+  noi_proxy:
+    label: Net Operating Income (proxy)
+    family: reit
+    expr: rental_revenue - property_operating_expense
+    applies_to: [reit]
+    format: currency
+    direction: higher_better

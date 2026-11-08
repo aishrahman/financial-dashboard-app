@@ -1,0 +1,70 @@
+# How each statement is laid out on the page: sections, and the order of lines
+# within them, top to bottom as a filing presents them.
+#
+# One layout serves every template. A company shows only the lines it has, so
+# a bank reads interest income -> net interest income -> provision ->
+# noninterest income and expense, an insurer reads premiums -> investment
+# income -> losses incurred, and an industrial reads revenue -> cost of revenue
+# -> gross profit -> operating expenses, all from the same list.
+#
+# Every item in items.yaml with one of these statements must appear here
+# exactly once; tests/test_registry.py enforces it, so a new item cannot drop
+# silently to the bottom of a table, which is how the alphabetical order this
+# replaced put Comprehensive Income above Revenue.
+
+income_statement:
+  - section: Revenue
+    items: [revenue, interest_income, interest_income_loans, interest_expense_deposits,
+            net_interest_income, noninterest_income, premiums_direct, premiums_ceded,
+            premiums_earned, net_investment_income, realized_gains, rental_revenue]
+  - section: Cost of revenue
+    items: [cost_of_revenue, gross_profit]
+  - section: Operating expenses
+    items: [research_development, selling_general_admin, provision_credit_losses,
+            losses_incurred, underwriting_expenses, property_operating_expense,
+            depreciation_expense, noninterest_expense, operating_expenses,
+            operating_income]
+  - section: Non-operating and tax
+    items: [interest_expense, gain_on_sale, pretax_income_domestic,
+            pretax_income_foreign, pretax_income, income_tax_expense]
+  - section: Net income
+    items: [net_income, comprehensive_income]
+  - section: Per share
+    items: [eps_basic, eps_diluted, dividends_per_share, shares_basic, shares_diluted]
+
+balance_sheet:
+  - section: Assets
+    items: [cash_and_equivalents, fed_funds_sold, short_term_investments,
+            accounts_receivable, inventory, total_current_assets,
+            trading_assets, afs_securities, afs_amortized_cost, htm_securities,
+            investments_total, loans_net, allowance_credit_losses,
+            real_estate_gross, accumulated_depreciation, future_rent_receivable,
+            ppe_gross, construction_work_in_progress, ppe_net, operating_lease_rou,
+            goodwill, intangible_assets, spectrum_licences,
+            deferred_acquisition_costs, regulatory_assets, decommissioning_fund,
+            other_assets, total_assets]
+  - section: Liabilities
+    items: [accounts_payable, short_term_debt, short_term_borrowings,
+            total_current_liabilities, deposits, interest_bearing_deposits,
+            time_deposits, trading_liabilities, loss_reserves, unearned_premiums,
+            long_term_debt, mortgage_debt, operating_lease_liability,
+            deferred_tax_liabilities, regulatory_liabilities,
+            asset_retirement_obligation, total_liabilities]
+  - section: Equity
+    items: [common_equity, retained_earnings, accumulated_oci, total_equity,
+            noncontrolling_interest, temporary_equity, total_liabilities_and_equity]
+  - section: Shares
+    items: [shares_outstanding, shares_issued, shares_outstanding_cover]
+
+cash_flow:
+  - section: Operating activities
+    items: [depreciation_amortization, stock_based_compensation, deferred_income_tax,
+            cash_from_operations]
+  - section: Investing activities
+    items: [capital_expenditures, acquisitions, cash_from_investing]
+  - section: Financing activities
+    items: [change_in_deposits, proceeds_from_long_term_debt,
+            repayments_of_long_term_debt, proceeds_from_common_stock,
+            share_repurchases, dividends_paid, cash_from_financing]
+  - section: Supplemental
+    items: [interest_paid, income_taxes_paid, losses_paid]
